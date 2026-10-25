@@ -1,0 +1,64 @@
+# 1. Distributed web infrastructure
+
+## Scenario
+
+A user wants to access `www.foobar.com`. DNS resolves `www.foobar.com` to the IP of the load balancer. From there, the request is routed into a three-server infrastructure designed to remove the single point of failure we had in the simple web stack.
+
+## 1) The infrastructure
+
+```
+                          [ User ]
+                             |
+                (DNS: www.foobar.com -> LB IP)
+                             |
+                             v
+                    =====================
+                    |   HAProxy (LB)    |
+                    =====================
+                        /            \
+                       /              \
+                      v                v
+        =====================    =====================
+        |     SERVER 1      |    |     SERVER 2      |
+        |                   |    |                   |
+        |  [ Nginx ]        |    |  [ Nginx ]        |
+        |      |            |    |      |            |
+        |  [ App Server ]   |    |  [ App Server ]   |
+        |      |            |    |      |            |
+        |  [ App Code ]     |    |  [ App Code ]     |
+        |      |            |    |      |            |
+        |  [ MySQL PRIMARY ]|<---|  [ MySQL REPLICA ]|
+        =====================    =====================
+```
+
+## 2) Why each new element was added
+
+- **Load balancer (HAProxy)**: distributes incoming traffic across Server 1 and Server 2 instead of sending everyone to a single machine. This removes the web/app server as a single point of failure and lets the infrastructure handle more simultaneous users.
+- **A second full server** (web server + app server + code + database): gives us redundancy. If one server goes down, the other can still serve traffic. It also means maintenance (deploying new code, restarting a service) can be done on one server while the other keeps serving users, which reduces downtime.
+- **A second MySQL instance configured as a Primary-Replica cluster** (rather than two fully independent databases): keeps the data consistent across both servers so that no matter which server a user's request lands on, the data being read is up to date (or very close to it).
+
+## 3) Load balancer algorithm
+
+HAProxy can be configured with several distribution algorithms; a common default is **Round Robin**. In Round Robin, each new incoming request is sent to the next server in the list, in rotating order (Server 1, then Server 2, then back to Server 1, and so on), regardless of each server's current load. Other algorithms exist, such as **Least Connections** (send the next request to whichever server currently has the fewest active connections), but Round Robin is a simple, common starting point.
+
+## 4) Active-Active vs Active-Passive
+
+- **Active-Active**: all servers behind the load balancer are actively handling traffic at the same time. Both Server 1 and Server 2 receive and respond to requests simultaneously. This setup is used here — it increases capacity and provides redundancy at the same time.
+- **Active-Passive**: only one server (the "active" one) handles traffic at any given time. The second server ("passive"/standby) sits idle, ready to take over only if the active server fails. This setup provides redundancy but does **not** increase capacity, since the passive server isn't doing any work under normal conditions.
+
+This infrastructure uses an **Active-Active** setup, since both servers are handling live traffic simultaneously.
+
+## 5) Primary-Replica (Master-Slave) database cluster
+
+In a Primary-Replica setup, one database node (the **Primary**) accepts all write operations (`INSERT`, `UPDATE`, `DELETE`). Every change made on the Primary is then automatically copied over (replicated) to one or more **Replica** nodes. The Replica nodes keep an up-to-date (or near up-to-date) copy of the data and can be used to serve read operations (`SELECT`), which spreads out the read workload and keeps a backup copy of the data in case the Primary fails.
+
+## 6) Primary vs Replica, from the application's point of view
+
+- **Primary node**: the application sends all write queries here (creating, updating, or deleting data). It is the single source of truth for the data.
+- **Replica node**: the application can send read queries here (fetching data) to reduce load on the Primary. The application should **not** write to the Replica directly, since the Replica's job is to mirror the Primary, not to be modified independently.
+
+## 7) Issues with this infrastructure
+
+- **SPOF**: the load balancer itself is now a single point of failure. Even though we removed the SPOF at the web/app/database layer by duplicating servers, there is still only one HAProxy instance. If it goes down, no traffic reaches either server and the website becomes unreachable. The Primary database node is also a SPOF for writes — if it goes down, the application can't write any new data until a Replica is promoted.
+- **Security issues**: there is no firewall configured anywhere in this design, meaning any port on any server could potentially be reached directly from the internet, not just the ports intended for the web application. There is also no HTTPS/SSL certificate, which means all traffic — including sensitive information like passwords — travels between the user and the servers unencrypted and can be intercepted or read in transit.
+- **No monitoring**: there is nothing in place to track server health, performance, traffic, error rates, or resource usage (CPU, memory, disk). Without monitoring, the team has no visibility into problems (a failing server, a slow database, a traffic spike) until users start reporting the website is broken or slow.
