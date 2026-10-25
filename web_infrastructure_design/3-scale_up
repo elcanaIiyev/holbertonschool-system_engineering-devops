@@ -1,0 +1,63 @@
+# 3. Scale up
+
+## Scenario
+
+A user wants to access `www.foobar.com` over HTTPS. DNS resolves the domain to a cluster of two load balancers (so there's no single point of failure at the entry point anymore). From there, traffic is routed to dedicated web server(s), which forward dynamic requests to a dedicated application server, which talks to a dedicated database cluster.
+
+## 1) The infrastructure
+
+```
+                                [ User ]
+                                   |
+                       (DNS: www.foobar.com -> LB Cluster)
+                                   |
+                              HTTPS (encrypted)
+                                   |
+                                   v
+                    =====================================
+                    |        Firewall(s)                |
+                    =====================================
+                                   |
+                                   v
+              =========================================
+              |     HAProxy CLUSTER (Active-Active)   |
+              |  [ SSL Certificate ] [Monitoring]     |
+              |                                       |
+              |   =============       =============  |
+              |   | HAProxy 1 |       | HAProxy 2 |  |
+              |   =============       =============  |
+              =========================================
+                       /                    \
+                      /                      \
+                     v                        v
+        =====================         =====================
+        |     WEB SERVER 1  |         |     WEB SERVER 2  |
+        |     [ Nginx ]     |         |     [ Nginx ]     |
+        |  [ Monitoring ]   |         |  [ Monitoring ]   |
+        =====================         =====================
+                     \                        /
+                      \                      /
+                       v                    v
+              =========================================
+              |        APPLICATION SERVER            |
+              |        [ App Code ]                  |
+              |        [ Monitoring ]                |
+              =========================================
+                                   |
+                                   v
+              =========================================
+              |         DATABASE SERVER(S)           |
+              |   [ MySQL PRIMARY ] <-> [ REPLICA ]  |
+              |        [ Monitoring ]                 |
+              =========================================
+```
+
+## 2) Why each new element was added
+
+- **A second load balancer, configured as a cluster with the first** (rather than a lone HAProxy instance): removes the load balancer as a single point of failure. In a load-balancer cluster, both nodes are aware of each other, share a virtual/floating IP (often via a protocol like VRRP/keepalived), and if one HAProxy instance goes down, the other keeps handling all incoming traffic without the website becoming unreachable.
+- **Splitting the web server, application server, and database into their own dedicated servers** (instead of bundling them all together on the same machine): each layer can now be scaled, maintained, and secured independently.
+  - The **web server(s)** can be scaled out on their own if the site gets a lot of static-content or connection-handling traffic, without needing to duplicate the application or database layer.
+  - The **application server** can be scaled or updated (deploying new code) without touching the web server or database.
+  - The **database server** keeps its resources (CPU, memory, disk I/O) dedicated to running MySQL, instead of competing with a web or application server process for the same hardware. It also means a security exposure on the web/app layer doesn't automatically put the database on the same compromised machine.
+
+In short: separating these components lets each one grow, fail, and be repaired independently, which is exactly what "scaling up" an infrastructure is about.
