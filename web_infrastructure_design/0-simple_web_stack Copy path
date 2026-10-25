@@ -1,0 +1,63 @@
+# 0. Simple web stack
+
+## Scenario
+
+A user wants to access the website `www.foobar.com`. Here is everything that happens, and everything living on the one server that answers the request.
+
+## 1) The request path
+
+1. The user's computer needs to find out where `www.foobar.com` lives. It queries a **DNS (Domain Name System)** resolver.
+2. The DNS resolver looks up `foobar.com` and finds a record for the `www` subdomain. This is an **A record** — it maps the name `www.foobar.com` directly to an IPv4 address: `8.8.8.8`.
+3. The user's computer now knows to send its request to `8.8.8.8`.
+4. The request travels over the internet using the **HTTP (or HTTPS)** protocol — this is what the server and the user's computer use to communicate. HTTP runs on top of TCP/IP, which handles the actual packet delivery.
+5. The request arrives at the server sitting at `8.8.8.8`.
+
+## 2) What's inside that one server
+
+Everything below lives on a **single** physical or virtual machine:
+
+```
+                     [ User ]
+                        |
+             (DNS lookup: www.foobar.com -> 8.8.8.8)
+                        |
+                        v
+              =========================
+              |     SERVER 8.8.8.8    |
+              |                       |
+              |   [ Nginx ]  <- Web server, port 80/443
+              |       |               |
+              |   [ App Server ]      |
+              |       |               |
+              |   [ Application Code ]|
+              |       |               |
+              |   [ MySQL Database ]  |
+              =========================
+```
+
+- **Nginx (web server)**: receives the incoming HTTP request first. Its job is to accept connections from users, serve static content directly when possible (images, CSS, JS), and forward dynamic requests to the application server.
+- **Application server**: runs the actual business logic — it executes your code and decides what content to generate depending on the request (e.g. "log this user in", "show this product page").
+- **Application code (codebase)**: the actual files that make up the website/app — what the application server executes.
+- **MySQL (database)**: stores and returns persistent data — user accounts, articles, products, etc. The application server queries it and uses the results to build the response.
+
+6. The finished response (usually an HTML page) travels back over the same path to the user's browser, which renders it.
+
+## 3) Definitions
+
+| Term | Explanation |
+|---|---|
+| **Server** | A physical or virtual machine that provides a service (in this case, a website) to other machines/clients over a network. |
+| **Domain name** | A human-readable name (`foobar.com`) that maps to a machine's IP address, so users don't have to remember numbers. |
+| **`www` record** | An **A record** — it points a subdomain (`www.foobar.com`) directly to an IPv4 address. |
+| **Web server** | Software (Nginx) that handles incoming HTTP requests, serves static files, and passes dynamic requests along. |
+| **Application server** | Software that runs your application's code and generates dynamic content. |
+| **Database** | Software (MySQL) that stores data in a structured, queryable, persistent way. |
+| **Communication protocol** | HTTP/HTTPS — the protocol the server and the user's browser use to exchange requests and responses. |
+
+## 4) Issues with this infrastructure
+
+This design is intentionally minimal, and that minimalism is exactly what breaks it at scale:
+
+- **SPOF (Single Point of Failure)**: everything — web server, app server, code, and database — lives on one machine. If that server goes down (hardware failure, crash, network issue), the **entire** website goes down. There is no redundancy anywhere.
+- **Downtime during maintenance**: since the web server, app server, and database all share the same machine, any maintenance — deploying new code, restarting Nginx, patching the OS, upgrading MySQL — requires interrupting the service users are actively depending on. There is no way to update one component without risking (or causing) downtime for the whole stack.
+- **Cannot scale**: this server has a fixed amount of CPU, RAM, and disk. If traffic spikes, there is no second server to share the load — the single machine will slow down or crash entirely. There is no load balancing, and no way to distribute traffic across multiple machines because there is only one.
