@@ -1,0 +1,85 @@
+# 2. Secured and monitored web infrastructure
+
+## Scenario
+
+A user wants to access `www.foobar.com`. This time, their browser connects over HTTPS. The request passes through a firewall before reaching the load balancer, then through more firewalls before reaching each server, and every component in the chain is being watched by a monitoring client.
+
+## 1) The infrastructure
+
+```
+                             [ User ]
+                                |
+                    (DNS: www.foobar.com -> LB IP)
+                                |
+                         HTTPS (encrypted)
+                                |
+                                v
+                        =============
+                        | Firewall  |
+                        =============
+                                |
+                                v
+                    =========================
+                    |  HAProxy (LB)         |
+                    |  [ SSL Certificate ]  |
+                    |  [ Monitoring client ]|
+                    =========================
+                        /              \
+                       /                \
+                      v                  v
+            =============          =============
+            | Firewall  |          | Firewall  |
+            =============          =============
+                  |                      |
+                  v                      v
+    =========================   =========================
+    |     SERVER 1          |   |     SERVER 2          |
+    |                       |   |                       |
+    |  [ Nginx ]            |   |  [ Nginx ]            |
+    |       |               |   |       |               |
+    |  [ App Server ]       |   |  [ App Server ]       |
+    |       |               |   |       |               |
+    |  [ App Code ]         |   |  [ App Code ]         |
+    |       |               |   |       |               |
+    |  [ MySQL PRIMARY ]    |<--|  [ MySQL REPLICA ]    |
+    |       |               |   |       |               |
+    |  [ Monitoring client ]|   |  [ Monitoring client ]|
+    =========================   =========================
+```
+
+## 2) Why each new element was added
+
+- **3 firewalls** (one in front of the load balancer, one in front of each server): restrict incoming traffic to only the ports and protocols the infrastructure actually needs (e.g. 443 for HTTPS), blocking everything else. This shrinks the attack surface at every layer instead of relying on a single entry point to catch everything.
+- **1 SSL certificate**: allows the load balancer to serve the website over HTTPS, so traffic between the user and the infrastructure is encrypted.
+- **3 monitoring clients** (one per server, plus one on the load balancer): collect performance and health data (CPU, memory, disk, response times, error rates, QPS, etc.) from every part of the infrastructure, so problems can be detected and diagnosed instead of discovered only when users complain.
+
+## 3) What firewalls are for
+
+A firewall filters incoming and outgoing network traffic based on a set of rules, allowing only traffic on approved ports/protocols and blocking everything else. It's the first line of defense against unauthorized access — reducing the number of ways an attacker could reach a server that isn't meant to be publicly exposed (e.g. the MySQL port, which should never be reachable directly from the internet).
+
+## 4) Why traffic is served over HTTPS
+
+HTTPS encrypts the data exchanged between the user's browser and the server using SSL/TLS. Without it, anything sent over the connection — login credentials, personal information, session cookies — travels as plain text and can be intercepted, read, or modified by anyone positioned between the user and the server (a "man-in-the-middle" attack). HTTPS also lets the user verify they're actually talking to the real `www.foobar.com` and not an impersonator.
+
+## 5) What monitoring is used for
+
+Monitoring gives visibility into how the infrastructure is performing and behaving in real time: CPU/memory/disk usage, request volume, error rates, response times, database performance, and so on. It lets the team detect issues early (before users are heavily impacted), understand traffic patterns, plan capacity, and diagnose the root cause of an incident after it happens by looking back at historical data.
+
+## 6) How the monitoring tool collects data
+
+A small monitoring client (agent), installed on each server, runs in the background and periodically collects metrics and/or logs from that machine (system metrics, application logs, custom application metrics). It then forwards that data to the monitoring service (like Sumo Logic), typically over the network, where it is stored, indexed, and made available for dashboards, search, and alerting.
+
+## 7) Monitoring web server QPS
+
+QPS (Queries Per Second) for the web server isn't something the generic system-level monitoring client collects out of the box. To monitor it specifically, I would either:
+
+- configure the monitoring agent to parse the Nginx access logs and extract a metric counting requests per second, or
+- expose a dedicated metrics endpoint from Nginx (e.g. via a `stub_status`-type module) that reports current request counts, and have the monitoring client scrape that endpoint at regular intervals.
+
+Either way, the resulting QPS metric would then be sent to the monitoring service to be graphed and alerted on.
+
+## 8) Issues with this infrastructure
+
+- **Terminating SSL at the load balancer**: the load balancer decrypts HTTPS traffic and then forwards it to the web servers as plain HTTP. This means traffic between the load balancer and the servers is unencrypted, which is a security gap if an attacker gets access to that internal network segment. It also puts the entire decryption workload on a single machine (the load balancer), and since there's only one load balancer, it remains a SPOF for the certificate/encryption layer too.
+- **Only one MySQL server accepting writes**: the Primary is a single point of failure for all write operations. If it goes down, the application can no longer create, update, or delete any data, even though the Replica is still up and could serve reads. There's also no automatic failover configured, so recovering write capability requires manual intervention (promoting the Replica).
+- **Servers with identical components** (web server + app server + database, all on the same machine): this bundles very different workloads onto the same hardware. A traffic spike or a bug in the application server can starve the database of resources (CPU, memory, disk I/O) on the same box, and vice versa. It also removes the ability to scale, secure, or maintain each layer independently — for example, you can't add more web/app capacity without also duplicating a full database instance you might not need, and a security issue in one component (like the web server) is running on the very same machine as your data.
